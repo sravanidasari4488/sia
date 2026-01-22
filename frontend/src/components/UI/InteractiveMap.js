@@ -1,7 +1,9 @@
 import React, { useEffect } from 'react';
-import { MapContainer, TileLayer, Circle, Popup, useMap } from 'react-leaflet';
+import { MapContainer, TileLayer, Circle, Popup, useMap, FeatureGroup } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
+import 'leaflet-draw/dist/leaflet.draw.css';
+import 'leaflet-draw';
 
 // Fix for default marker icons in React-Leaflet
 import icon from 'leaflet/dist/images/marker-icon.png';
@@ -28,6 +30,41 @@ function MapController({ center, zoom }) {
   return null;
 }
 
+function DrawingControl({ onCreated }) {
+  const map = useMap();
+
+  useEffect(() => {
+    const drawControl = new L.Control.Draw({
+      draw: {
+        polygon: {
+          allowIntersection: false,
+          showArea: true,
+        },
+        polyline: false,
+        circle: false,
+        marker: false,
+        circlemarker: false,
+        rectangle: true,
+      }
+    });
+
+    map.addControl(drawControl);
+
+    map.on(L.Draw.Event.CREATED, (e) => {
+      const layer = e.layer;
+      const geojson = layer.toGeoJSON();
+      onCreated(geojson);
+    });
+
+    return () => {
+      map.removeControl(drawControl);
+      map.off(L.Draw.Event.CREATED);
+    };
+  }, [map, onCreated]);
+
+  return null;
+}
+
 // Fix CSS variable usage in JSX
 const getThemeColor = (varName, fallback) => {
   if (typeof window !== 'undefined') {
@@ -38,7 +75,7 @@ const getThemeColor = (varName, fallback) => {
   return fallback;
 };
 
-function InteractiveMap({ lat, lon, landCover, bufferRadiusKm = 2.0, onLocationChange }) {
+function InteractiveMap({ lat, lon, landCover, bufferRadiusKm = 2.0, onPolygonDrawn }) {
   const position = [lat, lon];
   const radius = bufferRadiusKm * 1000; // Convert km to meters
   
@@ -79,6 +116,11 @@ function InteractiveMap({ lat, lon, landCover, bufferRadiusKm = 2.0, onLocationC
           opacity={0.7}
         />
         
+        {/* Drawing Tools */}
+        <FeatureGroup>
+          <DrawingControl onCreated={onPolygonDrawn} />
+        </FeatureGroup>
+
         {/* Analysis area circle */}
         <Circle
           center={position}
