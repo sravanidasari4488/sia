@@ -42,6 +42,60 @@ system = GeospatialIntelligenceSystem(
 )
 
 
+@app.route('/analyze-city', methods=['POST'])
+def analyze_city():
+    """Analyze the entire city boundary"""
+    try:
+        data = request.get_json()
+        if not data or 'city' not in data:
+            return jsonify({'error': 'City parameter is required'}), 400
+
+        city_name = data['city'].strip()
+        result = system.analyze_location(city_name)
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/analyze-polygon', methods=['POST'])
+def analyze_polygon():
+    """Analyze a user-drawn custom polygon"""
+    try:
+        data = request.get_json()
+        if not data or 'geometry' not in data:
+            return jsonify({'error': 'Geometry parameter is required'}), 400
+
+        geometry = data['geometry']
+
+        # Basic validation
+        if not isinstance(geometry, dict) or 'type' not in geometry or 'coordinates' not in geometry:
+            return jsonify({'error': 'Invalid GeoJSON geometry structure'}), 400
+
+        if geometry['type'] not in ['Polygon', 'MultiPolygon']:
+            return jsonify({'error': f'Unsupported geometry type: {geometry["type"]}. Only Polygon and MultiPolygon are supported.'}), 400
+
+        # Check vertex count to avoid massive requests
+        vertex_count = 0
+        try:
+            if geometry['type'] == 'Polygon':
+                for ring in geometry['coordinates']:
+                    vertex_count += len(ring)
+            elif geometry['type'] == 'MultiPolygon':
+                for polygon in geometry['coordinates']:
+                    for ring in polygon:
+                        vertex_count += len(ring)
+        except (KeyError, TypeError):
+            return jsonify({'error': 'Invalid coordinate structure in GeoJSON'}), 400
+
+        if vertex_count > 1000:
+            return jsonify({'error': 'Polygon has too many vertices (limit 1000)'}), 400
+
+        result = system.analyze_polygon(geometry)
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/localities', methods=['POST'])
 def get_localities():
     """Get list of localities for a city (fast, names only)"""

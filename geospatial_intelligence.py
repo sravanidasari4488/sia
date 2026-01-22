@@ -3721,6 +3721,23 @@ class UrbanisationRiskCalculator:
             'formula': 'URS = (0.40 × U) + (0.30 × (1 − V)) + (0.20 × P) + (0.10 × I)'
         }
 
+    @classmethod
+    def calculate_esi(cls, land_cover: LandCoverResult,
+                     air_quality: Optional[AirQualityData] = None) -> Dict:
+        """Calculate Environmental Sustainability Index (ESI)"""
+        V = (land_cover.forest + land_cover.vegetation) / 100.0
+
+        aqi_score = 1.0
+        if air_quality:
+            aqi_score = max(0.0, 1.0 - (air_quality.aqi - 1) / 4.0)
+
+        esi = (0.6 * V) + (0.4 * aqi_score)
+
+        return {
+            'esi_score': round(esi, 4),
+            'rating': 'Excellent' if esi > 0.8 else 'Good' if esi > 0.6 else 'Fair' if esi > 0.4 else 'Poor'
+        }
+
 
 class CarbonFootprintCalculator:
     """
@@ -4447,6 +4464,8 @@ class GeospatialIntelligenceSystem:
         self.disaster = DisasterService(openweather_key)
         self.risk_calculator = ClimateRiskCalculator()
         self.urbanisation_risk_calculator = UrbanisationRiskCalculator()
+        self.carbon_calculator = CarbonFootprintCalculator()
+        self.economic_analyzer = EconomicImpactAnalyzer()
         self.supabase = SupabaseService(supabase_url, supabase_key)
         self.news = NewsService(newsapi_key)
         
@@ -5444,6 +5463,7 @@ class GeospatialIntelligenceSystem:
         - pixel_counts: Raw pixel counts per Dynamic World class
         - percentages: Aggregated land cover percentages
         - date_of_satellite_image: Date of the Dynamic World image
+        - urbanisation_risk: Urban Risk Score and details
         """
         try:
             # Step 1: Fetch city administrative boundary polygon from OpenStreetMap
@@ -5465,7 +5485,14 @@ class GeospatialIntelligenceSystem:
             weather_data = self.weather.get_weather_data(center_lat, center_lon)
             forecast_data = self.weather.get_forecast_data(center_lat, center_lon)
             
-            # Step 6: Calculate climate risks
+            # Step 6: Get air quality for risk assessment
+            air_quality = None
+            try:
+                air_quality = self.weather.get_air_quality(center_lat, center_lon)
+            except:
+                pass
+
+            # Step 7: Calculate climate risks
             flood_risk = self.risk_calculator.calculate_flood_risk(
                 weather_data, land_cover, forecast_data
             )
@@ -5476,7 +5503,17 @@ class GeospatialIntelligenceSystem:
                 weather_data, land_cover, forecast_data
             )
             
-            # Step 7: Compile results as JSON
+            # Step 8: Calculate Urbanisation Risk Score
+            urs_result = self.urbanisation_risk_calculator.calculate_urbanisation_risk(
+                land_cover, None, air_quality
+            )
+
+            # Step 9: Calculate Environmental Sustainability Index
+            esi_result = self.urbanisation_risk_calculator.calculate_esi(
+                land_cover, air_quality
+            )
+
+            # Step 10: Compile results as JSON
             result = {
                 'city': location,
                 'coordinates': {
@@ -5515,17 +5552,112 @@ class GeospatialIntelligenceSystem:
                     'pressure': round(weather_data.pressure, 2)
                 },
                 'climate_risks': {
-                    'flood': round(flood_risk, 2),
-                    'heat': round(heat_risk, 2),
-                    'drought': round(drought_risk, 2)
+                    'flood': flood_risk,
+                    'heat': heat_risk,
+                    'drought': drought_risk
                 },
+                'urbanisation_risk': urs_result,
+                'esi': esi_result,
                 'timestamp': datetime.now().isoformat()
             }
             
             return result
-            
         except Exception as e:
             raise RuntimeError(f"Analysis failed: {str(e)}")
+
+    def analyze_polygon(self, geojson_geometry: Dict, start_date: str = None,
+                       end_date: str = None) -> Dict:
+        """
+        Analyze a custom GeoJSON polygon
+        """
+        try:
+            # Step 1: Convert GeoJSON to Earth Engine geometry
+            ee_geometry = ee.Geometry(geojson_geometry)
+
+            # Get centroid and bbox
+            centroid = ee_geometry.centroid().getInfo()['coordinates']
+            center_lon, center_lat = centroid
+
+            bbox_info = ee_geometry.bounds().getInfo()['coordinates'][0]
+            lons = [c[0] for c in bbox_info]
+            lats = [c[1] for c in bbox_info]
+            bbox = BoundingBox(
+                min_lon=min(lons),
+                min_lat=min(lats),
+                max_lon=max(lons),
+                max_lat=max(lats)
+            )
+
+            # Step 2: Get Sentinel-2 image for polygon
+            s2_composite, image_date = self.ee_service.get_sentinel2_sr_composite(
+                ee_geometry, bbox, start_date, end_date
+            )
+
+            if s2_composite is None:
+                raise RuntimeError("No satellite data available for this area.")
+
+            # Step 3: Spectral analysis
+            s2_with_indices = self.ee_service.calculate_spectral_indices(s2_composite)
+            classified_image = self.ee_service.classify_land_cover_spectral(s2_with_indices)
+
+            # Step 4: Area calculation
+            total_area_m2 = ee_geometry.area().getInfo()
+            area_by_class = self.ee_service.calculate_area_by_class_pixelarea(
+                classified_image, ee_geometry, scale=10
+            )
+
+            land_cover = self.spectral_classifier.aggregate_areas_to_percentages(
+                area_by_class, total_area_m2
+            )
+
+            # Step 5: Weather and risks
+            weather_data = self.weather.get_weather_data(center_lat, center_lon)
+            air_quality = None
+            try:
+                air_quality = self.weather.get_air_quality(center_lat, center_lon)
+            except:
+                pass
+
+            flood_risk = self.risk_calculator.calculate_flood_risk(weather_data, land_cover)
+            heat_risk = self.risk_calculator.calculate_heat_risk(weather_data, land_cover)
+            drought_risk = self.risk_calculator.calculate_drought_risk(weather_data, land_cover)
+
+            urs_result = self.urbanisation_risk_calculator.calculate_urbanisation_risk(
+                land_cover, None, air_quality
+            )
+
+            esi_result = self.urbanisation_risk_calculator.calculate_esi(
+                land_cover, air_quality
+            )
+
+            carbon_result = self.carbon_calculator.calculate_carbon_impact(
+                land_cover, total_area_m2 / 1e6
+            )
+
+            return {
+                'area_name': 'Custom Polygon',
+                'coordinates': {'lat': center_lat, 'lon': center_lon},
+                'landcover_percentages': {
+                    'urban': round(land_cover.urban, 2),
+                    'forest': round(land_cover.forest, 2),
+                    'vegetation': round(land_cover.vegetation, 2),
+                    'water': round(land_cover.water, 2)
+                },
+                'area_km2': round(total_area_m2 / 1e6, 2),
+                'satellite_date': image_date,
+                'flood_risk': flood_risk,
+                'heat_risk': heat_risk,
+                'drought_risk': drought_risk,
+                'urbanisation_risk': urs_result,
+                'esi': esi_result,
+                'carbon_analysis': carbon_result,
+                'weather': {
+                    'temperature': round(weather_data.temperature, 2),
+                    'humidity': round(weather_data.humidity, 2)
+                }
+            }
+        except Exception as e:
+            raise RuntimeError(f"Polygon analysis failed: {str(e)}")
 
 
 def main():

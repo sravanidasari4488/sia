@@ -22,6 +22,9 @@ function AnalysisPage() {
   const [loadingLocalities, setLoadingLocalities] = useState(false);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
+  const [cityResult, setCityResult] = useState(null);
+  const [polygonResult, setPolygonResult] = useState(null);
+  const [analyzingPolygon, setAnalyzingPolygon] = useState(false);
   const [error, setError] = useState(null);
   const [activeTab, setActiveTab] = useState('analysis'); // 'analysis' or 'satellite'
 
@@ -40,15 +43,23 @@ function AnalysisPage() {
     setResult(null);
 
     try {
-      const response = await axios.post(`${API_URL}/localities`, {
+      // 1. Fetch localities
+      const locResponse = await axios.post(`${API_URL}/localities`, {
         city: city.trim(),
-        radius_km: 8  // Reduced from 18km to avoid Overpass API timeouts
+        radius_km: 8
       });
       
-      setLocalities(response.data.localities || []);
-      if (response.data.localities.length === 0) {
+      setLocalities(locResponse.data.localities || []);
+      if (locResponse.data.localities.length === 0) {
         setError('No localities found for this city. Try a different city name.');
       }
+
+      // 2. Fetch city-wide analysis (including risk score)
+      const cityResponse = await axios.post(`${API_URL}/analyze-city`, {
+        city: city.trim()
+      });
+      setCityResult(cityResponse.data);
+
     } catch (err) {
       setError(
         err.response?.data?.error || 
@@ -57,6 +68,29 @@ function AnalysisPage() {
       );
     } finally {
       setLoadingLocalities(false);
+    }
+  };
+
+  const handlePolygonDrawn = async (geojson) => {
+    setAnalyzingPolygon(true);
+    setPolygonResult(null);
+    setError(null);
+
+    try {
+      const response = await axios.post(`${API_URL}/analyze-polygon`, {
+        geometry: geojson.geometry
+      });
+      setPolygonResult(response.data);
+      // Switch to satellite tab to show polygon results if not already there
+      setActiveTab('satellite');
+    } catch (err) {
+      setError(
+        err.response?.data?.error ||
+        err.message ||
+        'Failed to analyze custom area. Please try again.'
+      );
+    } finally {
+      setAnalyzingPolygon(false);
     }
   };
 
@@ -203,6 +237,56 @@ function AnalysisPage() {
           <div className="error-message">
             <span className="error-icon">⚠️</span>
             {error}
+          </div>
+        )}
+
+        {cityResult && (
+          <div className="result-section" style={{ border: '2px solid #6366f1', background: '#f5f3ff' }}>
+            <h2 className="section-title" style={{ color: '#4338ca' }}>🏙️ City-wide Urban Risk Analysis: {cityResult.city}</h2>
+            <div className="risk-grid">
+              <div className="risk-item">
+                <div className="risk-header">
+                  <span className="risk-icon">📊</span>
+                  <span className="land-cover-label">Urban Risk Score</span>
+                </div>
+                <div
+                  className="risk-value"
+                  style={{
+                    color: cityResult.urbanisation_risk.risk_level === 'Critical' || cityResult.urbanisation_risk.risk_level === 'High' ? '#ef4444' :
+                           cityResult.urbanisation_risk.risk_level === 'Moderate' ? '#f59e0b' : '#10b981'
+                  }}
+                >
+                  {(cityResult.urbanisation_risk.urs_score * 100).toFixed(1)} ({cityResult.urbanisation_risk.risk_level})
+                </div>
+              </div>
+
+              <div className="risk-item">
+                <div className="risk-header">
+                  <span className="risk-icon">🌱</span>
+                  <span className="land-cover-label">Sustainability Index (ESI)</span>
+                </div>
+                <div
+                  className="risk-value"
+                  style={{
+                    color: cityResult.esi.rating === 'Poor' ? '#ef4444' :
+                           cityResult.esi.rating === 'Fair' ? '#f59e0b' : '#10b981'
+                  }}
+                >
+                  {(cityResult.esi.esi_score * 100).toFixed(1)} ({cityResult.esi.rating})
+                </div>
+              </div>
+
+              <div className="risk-item">
+                <div className="risk-header">
+                  <span className="risk-icon">🏙️</span>
+                  <span className="land-cover-label">City Urbanization</span>
+                </div>
+                <div className="risk-value">{cityResult.percentages.urban.toFixed(1)}%</div>
+              </div>
+            </div>
+            <div style={{ fontSize: '12px', color: '#6b7280', marginTop: '10px', fontStyle: 'italic' }}>
+              * Based on city-wide administrative boundary analysis.
+            </div>
           </div>
         )}
 
@@ -1072,20 +1156,94 @@ function AnalysisPage() {
             {/* Satellite View Tab */}
             {activeTab === 'satellite' && (
               <div className="result-section">
-                <h2 className="section-title">🛰️ Interactive Map & Satellite View</h2>
+                <h2 className="section-title">🛰️ Interactive Map & Custom Area Analysis</h2>
+                <p style={{ marginBottom: '15px', color: '#6b7280' }}>
+                  Use the drawing tools on the left to analyze a custom area (Polygon or Rectangle).
+                </p>
                 
                 {/* Interactive Map */}
                 {result.coordinates && result.landcover_percentages && (
                   <div style={{ marginBottom: '30px' }}>
-                    <h3 style={{ fontSize: '1.2rem', marginBottom: '15px', color: 'var(--theme-text)' }}>
-                      Interactive Analysis Map
-                    </h3>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
+                      <h3 style={{ fontSize: '1.2rem', margin: 0, color: 'var(--theme-text)' }}>
+                        Interactive Analysis Map
+                      </h3>
+                      {analyzingPolygon && (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#6366f1', fontWeight: '600' }}>
+                          <span className="spinner" style={{ width: '16px', height: '16px', border: '2px solid #6366f1', borderTopColor: 'transparent' }}></span>
+                          Analyzing custom area...
+                        </div>
+                      )}
+                    </div>
                     <InteractiveMap
                       lat={result.coordinates.lat}
                       lon={result.coordinates.lon}
                       landCover={result.landcover_percentages}
                       bufferRadiusKm={2.0}
+                      onPolygonDrawn={handlePolygonDrawn}
                     />
+                  </div>
+                )}
+
+                {/* Custom Polygon Result */}
+                {polygonResult && (
+                  <div className="result-section" style={{ border: '2px solid #10b981', background: '#f0fdf4', marginTop: '20px' }}>
+                    <h3 className="section-title" style={{ color: '#059669' }}>📍 Custom Area Analysis</h3>
+                    <div className="info-grid">
+                      <div className="info-item">
+                        <span className="info-label">Area:</span>
+                        <span className="info-value">{polygonResult.area_km2} km²</span>
+                      </div>
+                      <div className="info-item">
+                        <span className="info-label">Urban Risk Score:</span>
+                        <span className="info-value" style={{
+                          color: polygonResult.urbanisation_risk.risk_level === 'Critical' || polygonResult.urbanisation_risk.risk_level === 'High' ? '#ef4444' : '#059669'
+                        }}>
+                          {(polygonResult.urbanisation_risk.urs_score * 100).toFixed(1)} ({polygonResult.urbanisation_risk.risk_level})
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="land-cover-grid" style={{ marginTop: '15px' }}>
+                      <div className="land-cover-item" style={{ background: 'white' }}>
+                        <div className="land-cover-label">Urban</div>
+                        <div className="land-cover-value">{polygonResult.landcover_percentages.urban}%</div>
+                      </div>
+                      <div className="land-cover-item" style={{ background: 'white' }}>
+                        <div className="land-cover-label">Forest</div>
+                        <div className="land-cover-value">{polygonResult.landcover_percentages.forest}%</div>
+                      </div>
+                      <div className="land-cover-item" style={{ background: 'white' }}>
+                        <div className="land-cover-label">Vegetation</div>
+                        <div className="land-cover-value">{polygonResult.landcover_percentages.vegetation}%</div>
+                      </div>
+                      <div className="land-cover-item" style={{ background: 'white' }}>
+                        <div className="land-cover-label">Water</div>
+                        <div className="land-cover-value">{polygonResult.landcover_percentages.water}%</div>
+                      </div>
+                    </div>
+
+                    {polygonResult.carbon_analysis && (
+                      <div style={{ marginTop: '20px', padding: '15px', background: 'white', borderRadius: '12px', border: '1px solid #d1fae5' }}>
+                        <h4 style={{ margin: '0 0 10px 0', color: '#065f46', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          🌱 Carbon Impact
+                        </h4>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '15px' }}>
+                          <div>
+                            <div style={{ fontSize: '12px', color: '#6b7280' }}>Net CO₂ Impact</div>
+                            <div style={{ fontWeight: '600', color: polygonResult.carbon_analysis.net_carbon_impact.co2_per_year > 0 ? '#059669' : '#dc2626' }}>
+                              {polygonResult.carbon_analysis.net_carbon_impact.co2_per_year.toFixed(2)} tonnes/year
+                            </div>
+                          </div>
+                          <div>
+                            <div style={{ fontSize: '12px', color: '#6b7280' }}>Economic Value</div>
+                            <div style={{ fontWeight: '600', color: '#059669' }}>
+                              ₹{Math.abs(polygonResult.carbon_analysis.net_carbon_impact.value_rupees_per_year).toLocaleString()} / year
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
 
